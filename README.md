@@ -2,6 +2,8 @@
 
 Minijuego web oscuro e inquietante, en tercera persona (vista 3/4 desde arriba), donde el personaje y todo el mundo están hechos de **cerebritos diminutos** dibujados solo con contornos sobre fondo negro.
 
+**Jugar online:** [m3nt41.com/br41nd4m4g3](https://m3nt41.com/br41nd4m4g3/index.html)
+
 Es **un solo archivo** (`index.html`), sin librerías, sin frameworks y sin imágenes ni audios externos: los gráficos se dibujan con Canvas 2D y todo el sonido se genera con Web Audio.
 
 ## Cómo probarlo
