@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fase 0 · cerebrito mini (v2)</title>
+  <style>
+    html, body {
+      margin: 0;
+      background: #000;
+      color: #8a8a8a;
+      font: 13px/1.5 system-ui, sans-serif;
+    }
+    main { padding: 24px 28px 48px; }
+    h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #bdbdbd; }
+    h2 { margin: 28px 0 10px; font-size: 13px; font-weight: 600; color: #bdbdbd; }
+    p { margin: 0 0 6px; max-width: 70ch; }
+    canvas { display: block; }
+    #columnas {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 40px;
+    }
+    .col { display: flex; flex-direction: column; gap: 10px; }
+    .col .tam { font-size: 15px; color: #d0d0d0; }
+    .col .nota { font-size: 12px; color: #6a6a6a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Fase 0 · cerebrito mini</h1>
+    <p>Mirá la página a 100% de zoom del navegador y a tu distancia normal de uso. Lo que hay que decidir: ¿cuál es el tamaño más chico en el que los cerebritos se leen y en el que la figura se lee como persona?</p>
+
+    <h2>Forma ampliada (las 4 variaciones)</h2>
+    <canvas id="ampliado"></canvas>
+
+    <h2>Tamaños de prueba: cerebritos sueltos y silueta humana de ~100 cerebritos</h2>
+    <div id="columnas"></div>
+  </main>
+
+  <script>
+    // ===== Configuración (editable) =====
+    const CONFIG = {
+      tamanos: [6, 8, 10, 12],     // ancho del cerebrito mini en px
+      variaciones: 4,              // formas distintas del cerebrito
+      bultos: 4,                   // bultos del contorno por lado
+      semilla: 1337,               // semilla fija: nada parpadea entre cargas
+      colorTrazo: '#d0d0d0',
+      grosorMin: 0.6,              // grosor mínimo del trazo en px
+      grosorRel: 0.13,             // grosor relativo al tamaño del cerebrito
+      dprMax: 2,                   // tope de devicePixelRatio
+      cantidadSilueta: 100,        // cerebritos en la silueta humana
+      espaciado: 1.4,              // distancia entre cerebritos (en tamaños de cerebrito)
+      rotacionMax: 0.7,            // rotación aleatoria máx. (radianes, ±)
+      jitterPos: 0.2,              // desviación de posición (fracción del tamaño)
+      sueltosCols: 6,
+      sueltosFilas: 4,
+      sueltosSep: 3,               // separación entre sueltos (en tamaños de cerebrito)
+      ampliadoPx: 120              // tamaño de la vista ampliada
+    };
+
+    // ===== Utilidades =====
+    // Generador pseudoaleatorio con semilla (mulberry32)
+    function crearRng(semilla) {
+      let a = semilla >>> 0;
+      return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    // Crea un canvas con tamaño CSS (w, h) y resolución para el dpr
+    function crearCanvas(canvas, w, h, dpr) {
+      canvas.width = Math.ceil(w * dpr);
+      canvas.height = Math.ceil(h * dpr);
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      return canvas.getContext('2d');
+    }
+
+    // ===== El cerebrito mini =====
+    // Path2D en coordenadas unitarias: ancho 1, centrado en (0,0).
+    // Contorno ovalado con bultos, muesca arriba, línea central y una curvita interna por lado.
+    // Cada variación mueve un poco los puntos (con la semilla).
+    function crearPathCerebrito(v) {
+      const rng = crearRng(CONFIG.semilla + v * 101);
+      const j = (a) => (rng() - 0.5) * 2 * a;   // aleatorio en ±a
+      const RX = 0.5, RY = 0.4;
+      const p = new Path2D();
+
+      // punto sobre la elipse (ángulo en grados, 0 = derecha, -90 = arriba) con factor de radio
+      const sobreElipse = (grados, f) => {
+        const a = grados * Math.PI / 180;
+        return [RX * f * Math.cos(a), RY * f * Math.sin(a)];
+      };
+
+      // Punto del borde: signo = +1 derecha / -1 izquierda; i = posición (0 = muesca, bultos = fondo)
+      const bultos = CONFIG.bultos;
+      const puntoBorde = (signo, i, f) => {
+        const [x, y] = sobreElipse(-90 + (180 * i) / bultos, f);
+        return [signo * x, y];
+      };
+      // La muesca se hunde y se comparte entre los dos lados para que el trazo cierre limpio
+      const muesca = puntoBorde(1, 0, 0.72 + j(0.03));
+      // Por cada lado: puntos finales de cada tramo y su punto de control (empuja el bulto hacia afuera)
+      const lados = [1, -1].map((signo) => {
+        const fin = [], ctl = [];
+        for (let i = 0; i < bultos; i++) {
+          ctl.push(puntoBorde(signo, i + 0.5, 1.2 + j(0.05)));
+          fin.push(puntoBorde(signo, i + 1, i + 1 < bultos ? 1 + j(0.04) : 1));
+        }
+        return { fin, ctl };
+      });
+
+      // derecha: de la muesca hacia abajo
+      p.moveTo(muesca[0], muesca[1]);
+      for (let i = 0; i < bultos; i++) {
+        p.quadraticCurveTo(lados[0].ctl[i][0], lados[0].ctl[i][1], lados[0].fin[i][0], lados[0].fin[i][1]);
+      }
+      // izquierda: del fondo de vuelta a la muesca (tramos al revés)
+      for (let i = bultos - 1; i >= 0; i--) {
+        const destino = i > 0 ? lados[1].fin[i - 1] : muesca;
+        p.quadraticCurveTo(lados[1].ctl[i][0], lados[1].ctl[i][1], destino[0], destino[1]);
+      }
+
+      // línea central: de la muesca al fondo
+      p.moveTo(muesca[0], muesca[1]);
+      p.lineTo(j(0.03), RY * 0.95);
+
+      // curvitas internas (una por lado, espejadas con algo de variación)
+      for (const lado of [1, -1]) {
+        p.moveTo(lado * (0.05 + j(0.01)), -0.12 + j(0.03));
+        p.quadraticCurveTo(lado * (0.26 + j(0.04)), -0.26 + j(0.03), lado * (0.31 + j(0.03)), -0.02 + j(0.03));
+        p.moveTo(lado * (0.06 + j(0.01)), 0.14 + j(0.03));
+        p.quadraticCurveTo(lado * (0.22 + j(0.04)), 0.08 + j(0.03), lado * (0.32 + j(0.03)), 0.22 + j(0.03));
+      }
+      return p;
+    }
+
+    // Pre-renderiza cada variación en un canvas pequeño (con dpr)
+    function crearSprites(tam, dpr) {
+      const lado = Math.ceil(tam + 2);   // 1 px de margen por lado
+      const grosor = Math.max(CONFIG.grosorMin, tam * CONFIG.grosorRel);
+      const sprites = [];
+      for (let v = 0; v < CONFIG.variaciones; v++) {
+        const canvas = document.createElement('canvas');
+        const ctx = crearCanvas(canvas, lado, lado, dpr);
+        ctx.setTransform(dpr * tam, 0, 0, dpr * tam, dpr * lado / 2, dpr * lado / 2);
+        ctx.lineWidth = grosor / tam;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = CONFIG.colorTrazo;
+        ctx.stroke(crearPathCerebrito(v));
+        sprites.push({ canvas, lado });
+      }
+      return sprites;
+    }
+
+    // Estampa un sprite con posición y rotación (un solo setTransform, sin save/restore)
+    function estampar(ctx, sprite, x, y, ang, dpr) {
+      const c = Math.cos(ang) * dpr;
+      const s = Math.sin(ang) * dpr;
+      ctx.setTransform(c, s, -s, c, x * dpr, y * dpr);
+      ctx.drawImage(sprite.canvas, -sprite.lado / 2, -sprite.lado / 2, sprite.lado, sprite.lado);
+    }
+
+    // ===== Silueta humana =====
+    // Contorno cerrado en coordenadas normalizadas (altura total = 1, y hacia abajo)
+    function contornoHumano() {
+      const pts = [];
+      // cabeza: arco por arriba, de la unión derecha del cuello a la izquierda
+      const cy = 0.075, r = 0.07, nx = 0.03;
+      const a0 = Math.atan2(Math.sqrt(r * r - nx * nx), nx);
+      const a1 = -Math.PI - a0;
+      const pasos = 40;
+      for (let i = 0; i <= pasos; i++) {
+        const a = a0 + (a1 - a0) * (i / pasos);
+        pts.push([r * Math.cos(a), cy + r * Math.sin(a)]);
+      }
+      // mitad izquierda: cuello, hombro, brazo, cadera, pierna hasta la entrepierna
+      // brazos separados del torso y hueco claro entre las piernas
+      const izq = [
+        [-0.03, 0.16], [-0.14, 0.18], [-0.225, 0.50], [-0.175, 0.51], [-0.115, 0.29],
+        [-0.10, 0.52], [-0.11, 1.0], [-0.035, 1.0], [0, 0.60]
+      ];
+      for (const p of izq) pts.push(p);
+      // mitad derecha: espejo de la izquierda en orden inverso
+      for (let i = izq.length - 2; i >= 0; i--) pts.push([-izq[i][0], izq[i][1]]);
+      return pts;
+    }
+
+    // Reparte n puntos a distancia pareja sobre un contorno cerrado.
+    // Devuelve también el perímetro (en unidades normalizadas).
+    function remuestrear(pts, n) {
+      const m = pts.length;
+      const acum = [0];
+      for (let i = 0; i < m; i++) {
+        const a = pts[i], b = pts[(i + 1) % m];
+        acum.push(acum[i] + Math.hypot(b[0] - a[0], b[1] - a[1]));
+      }
+      const perimetro = acum[m];
+      const out = [];
+      let seg = 0;
+      for (let k = 0; k < n; k++) {
+        const objetivo = (k / n) * perimetro;
+        while (acum[seg + 1] < objetivo) seg++;
+        const a = pts[seg], b = pts[(seg + 1) % m];
+        const t = (objetivo - acum[seg]) / (acum[seg + 1] - acum[seg]);
+        out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+      }
+      return { puntos: out, perimetro };
+    }
+
+    // ===== Dibujo =====
+    function dibujarAmpliado(dpr) {
+      const px = CONFIG.ampliadoPx;
+      const celda = px + 40;
+      const ctx = crearCanvas(document.getElementById('ampliado'), celda * CONFIG.variaciones, celda, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.strokeStyle = CONFIG.colorTrazo;
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      for (let v = 0; v < CONFIG.variaciones; v++) {
+        ctx.setTransform(dpr * px, 0, 0, dpr * px, dpr * (celda * v + celda / 2), dpr * celda / 2);
+        ctx.lineWidth = 1.5 / px;
+        ctx.stroke(crearPathCerebrito(v));
+      }
+    }
+
+    function crearColumna(tam, dpr) {
+      const sprites = crearSprites(tam, dpr);
+      const rng = crearRng(CONFIG.semilla);   // misma semilla: mismo reparto en todos los tamaños
+      const col = document.createElement('div');
+      col.className = 'col';
+
+      const titulo = document.createElement('div');
+      titulo.className = 'tam';
+      titulo.textContent = tam + ' px';
+      col.appendChild(titulo);
+
+      // Cerebritos sueltos (mezcla de variaciones y rotaciones)
+      const sep = tam * CONFIG.sueltosSep;
+      const wS = (CONFIG.sueltosCols + 1) * sep;
+      const hS = (CONFIG.sueltosFilas + 1) * sep;
+      const cvS = document.createElement('canvas');
+      const ctxS = crearCanvas(cvS, wS, hS, dpr);
+      for (let f = 0; f < CONFIG.sueltosFilas; f++) {
+        for (let c = 0; c < CONFIG.sueltosCols; c++) {
+          const v = Math.floor(rng() * CONFIG.variaciones);
+          const ang = (rng() * 2 - 1) * CONFIG.rotacionMax;
+          estampar(ctxS, sprites[v], sep * (c + 1), sep * (f + 1), ang, dpr);
+        }
+      }
+      col.appendChild(cvS);
+
+      // Silueta humana: la altura sale de cuántos cerebritos caben en el contorno
+      const contorno = remuestrear(contornoHumano(), CONFIG.cantidadSilueta);
+      const alto = (CONFIG.cantidadSilueta * CONFIG.espaciado * tam) / contorno.perimetro;
+      const margen = tam * 2;
+      const wH = 0.38 * alto + margen * 2;
+      const hH = alto + margen * 2;
+      const cvH = document.createElement('canvas');
+      const ctxH = crearCanvas(cvH, wH, hH, dpr);
+      for (const [px, py] of contorno.puntos) {
+        const v = Math.floor(rng() * CONFIG.variaciones);
+        const ang = (rng() * 2 - 1) * CONFIG.rotacionMax;
+        const dx = (rng() * 2 - 1) * CONFIG.jitterPos * tam;
+        const dy = (rng() * 2 - 1) * CONFIG.jitterPos * tam;
+        estampar(ctxH, sprites[v], wH / 2 + px * alto + dx, margen + py * alto + dy, ang, dpr);
+      }
+      col.appendChild(cvH);
+
+      const nota = document.createElement('div');
+      nota.className = 'nota';
+      nota.textContent = CONFIG.cantidadSilueta + ' cerebritos · figura de ~' + Math.round(alto) + ' px de alto';
+      col.appendChild(nota);
+      return col;
+    }
+
+    function dibujarTodo() {
+      const dpr = Math.min(window.devicePixelRatio || 1, CONFIG.dprMax);
+      const cont = document.getElementById('columnas');
+      cont.innerHTML = '';
+      dibujarAmpliado(dpr);
+      for (const tam of CONFIG.tamanos) cont.appendChild(crearColumna(tam, dpr));
+    }
+
+    dibujarTodo();
+    window.addEventListener('resize', dibujarTodo);
+  </script>
+</body>
+</html>

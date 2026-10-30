@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>El encapuchado</title>
+  <style>
+    html, body {
+      margin: 0;
+      background: #000;
+      color: #8a8a8a;
+      font: 13px/1.5 system-ui, sans-serif;
+    }
+    main { max-width: 1300px; margin: 0 auto; padding: 24px 28px 56px; }
+    h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #bdbdbd; }
+    p { margin: 0 0 6px; max-width: 80ch; }
+    ul { margin: 6px 0 0; padding-left: 18px; max-width: 80ch; }
+    li { margin: 2px 0; }
+    .barra { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 22px; }
+    .barra span { color: #6a6a6a; }
+    button {
+      padding: 6px 14px;
+      background: transparent;
+      border: 1px solid #6a6a6a;
+      color: #c8c8c8;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover, button:focus-visible { border-color: #e2b84a; color: #e2b84a; outline: none; }
+    button[aria-pressed="true"] { border-color: #e2b84a; color: #e2b84a; }
+    .fila { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+    .tarjeta { border: 1px solid #1c1c1c; padding: 10px 12px 12px; }
+    .tarjeta canvas { display: block; }
+    .tarjeta h2 { margin: 8px 0 0; font-size: 13px; font-weight: 600; color: #d0d0d0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>El encapuchado</h1>
+    <p>Misma técnica del juego: cerebritos mini de 6 px que persiguen su sitio y vibran apenas al estar quietos. La tarjeta chica va a tamaño real (180 px de alto) y la grande es el mismo muñeco ampliado.</p>
+    <ul>
+      <li>Quieto: flota, respira y el dobladillo ondula.</li>
+      <li>Caminando: se inclina hacia donde va, las mangas se balancean, la tela se queda atrás y la neblina de abajo se agita.</li>
+      <li>Hacia abajo (de frente): abertura vacía en la capucha y un broche en el cuello. De espaldas no se ven.</li>
+      <li>Al girar: la túnica es como un cilindro. La abertura, el broche, los pliegues y las mangas se deslizan por su superficie hacia el lado al que camina y se desvanecen al llegar al borde. El giro tarda ~0.4 s.</li>
+    </ul>
+    <div class="barra">
+      <button id="bAuto" type="button" aria-pressed="true">Automático (camina solo)</button>
+      <button id="bManual" type="button" aria-pressed="false">Manual: WASD / flechas</button>
+      <button id="bRearmar" type="button">Rearmar</button>
+      <span>Al tocar una tecla pasa a manual.</span>
+    </div>
+    <div class="fila" id="fila"></div>
+  </main>
+
+  <script>
+    // ===== Configuración (editable) =====
+    const CONFIG = {
+      semilla: 1337,
+      dprMax: 2,
+      colorTrazo: '#d0d0d0',
+      colorTenue: '#7a7a7a',
+      colorBrillo: '#ffffff',
+      variaciones: 4,
+      bultos: 4,
+      grosorMin: 0.6,
+      grosorRel: 0.13,
+      rotacionMax: 0.7,
+      celda: { w: 300, h: 300, suelo: 250 },   // lienzo de cada tarjeta (px lógicos) y altura del suelo
+      zooms: [1, 2.2],                         // tamaño real y ampliado
+      alturaPersonaje: 180,                    // igual que el juego
+      giro: 8,                                 // rapidez del giro (más bajo = se da vuelta más lento y suave)
+      rango: { x: 85, y: 45 },
+      velMax: 110,                             // más lenta que el juego para que quepa
+      acel: 9,
+      cadencia: 0.1,
+      mezcla: 10,
+      seguirMin: 26,
+      seguirMax: 40,
+      vibAmp: 0.5,
+      vibVel: 2.2,
+      rotOnda: 0.12,
+      // Recorrido automático: [dirX, dirY, segundos]
+      auto: [
+        [1, 0, 0.7], [0, 0, 0.9], [-1, 0, 1.4], [0, 0, 0.9], [1, 0, 0.7], [0, 0, 0.9],
+        [0, -1, 0.9], [0, 0, 0.9], [0, 1, 0.9], [0, 0, 0.9]
+      ],
+      // El encapuchado
+      capa: {
+        arriba: -0.90,                         // altura de la punta de la capucha (en alturas del personaje)
+        dobladillo: -0.12,                     // altura del borde de la túnica: debajo flota
+        inclina: 0.06,                         // cuánto se inclina hacia donde va
+        arrastre: 0.14,                        // segundos de retraso de la tela en el borde
+        bruma: 6                               // cerebritos de neblina bajo la túnica
+      }
+    };
+    const ALT = CONFIG.alturaPersonaje;
+    const TAU = Math.PI * 2;
+    const sen = Math.sin, cos = Math.cos;
+    const TAM = { xs: 3.6, s: 4.6, m: 6 };
+    const limitar = (v, a, b) => Math.min(b, Math.max(a, v));
+    const suav = (rapidez, dt) => 1 - Math.exp(-rapidez * dt);
+    const frac = (x) => x - Math.floor(x);
+    const suavizar = (a, b, x) => { const u = limitar((x - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
+    const dpr = Math.min(window.devicePixelRatio || 1, CONFIG.dprMax);
+
+    // ===== Utilidades =====
+    function crearRng(semilla) {
+      let a = semilla >>> 0;
+      return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    // ===== El cerebrito mini (el mismo de la Fase 0) =====
+    function crearPathCerebrito(v) {
+      const rng = crearRng(CONFIG.semilla + v * 101);
+      const j = (a) => (rng() - 0.5) * 2 * a;
+      const RX = 0.5, RY = 0.4;
+      const p = new Path2D();
+      const sobreElipse = (grados, f) => {
+        const a = grados * Math.PI / 180;
+        return [RX * f * Math.cos(a), RY * f * Math.sin(a)];
+      };
+      const bultos = CONFIG.bultos;
+      const puntoBorde = (signo, i, f) => {
+        const [x, y] = sobreElipse(-90 + (180 * i) / bultos, f);
+        return [signo * x, y];
+      };
+      const muesca = puntoBorde(1, 0, 0.72 + j(0.03));
+      const lados = [1, -1].map((signo) => {
+        const fin = [], ctl = [];
+        for (let i = 0; i < bultos; i++) {
+          ctl.push(puntoBorde(signo, i + 0.5, 1.2 + j(0.05)));
+          fin.push(puntoBorde(signo, i + 1, i + 1 < bultos ? 1 + j(0.04) : 1));
+        }
+        return { fin, ctl };
+      });
+      p.moveTo(muesca[0], muesca[1]);
+      for (let i = 0; i < bultos; i++) {
+        p.quadraticCurveTo(lados[0].ctl[i][0], lados[0].ctl[i][1], lados[0].fin[i][0], lados[0].fin[i][1]);
+      }
+      for (let i = bultos - 1; i >= 0; i--) {
+        const destino = i > 0 ? lados[1].fin[i - 1] : muesca;
+        p.quadraticCurveTo(lados[1].ctl[i][0], lados[1].ctl[i][1], destino[0], destino[1]);
+      }
+      p.moveTo(muesca[0], muesca[1]);
+      p.lineTo(j(0.03), RY * 0.95);
+      for (const lado of [1, -1]) {
+        p.moveTo(lado * (0.05 + j(0.01)), -0.12 + j(0.03));
+        p.quadraticCurveTo(lado * (0.26 + j(0.04)), -0.26 + j(0.03), lado * (0.31 + j(0.03)), -0.02 + j(0.03));
+        p.moveTo(lado * (0.06 + j(0.01)), 0.14 + j(0.03));
+        p.quadraticCurveTo(lado * (0.22 + j(0.04)), 0.08 + j(0.03), lado * (0.32 + j(0.03)), 0.22 + j(0.03));
+      }
+      return p;
+    }
+
+    // Tonos: 0 normal, 1 tenue, 2 brillo. Los sprites se hacen por zoom para que el ampliado quede nítido.
+    const TONOS = [CONFIG.colorTrazo, CONFIG.colorTenue, CONFIG.colorBrillo];
+    const cacheSprites = new Map();
+    function crearSprites(tam, color, z) {
+      const E = dpr * z;
+      const lado = Math.ceil(tam + 2);
+      const grosor = Math.max(CONFIG.grosorMin, tam * CONFIG.grosorRel);
+      const sprites = [];
+      for (let v = 0; v < CONFIG.variaciones; v++) {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(lado * E);
+        canvas.height = Math.ceil(lado * E);
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(E * tam, 0, 0, E * tam, E * lado / 2, E * lado / 2);
+        ctx.lineWidth = grosor / tam;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = color;
+        ctx.stroke(crearPathCerebrito(v));
+        sprites.push({ canvas, lado });
+      }
+      return sprites;
+    }
+    function sprite(tam, tono, z) {
+      const clave = tam + '|' + tono + '|' + z;
+      let s = cacheSprites.get(clave);
+      if (!s) { s = crearSprites(tam, TONOS[tono], z); cacheSprites.set(clave, s); }
+      return s;
+    }
+
+    // ===== Ayudas para armar formas (P pone un cerebrito objetivo: x, y, tamaño, tono) =====
+    function anillo(P, cx, cy, rx, ry, n, tam, tono = 0, a0 = 0) {
+      for (let i = 0; i < n; i++) {
+        const a = a0 + (i / n) * TAU;
+        P(cx + cos(a) * rx, cy + sen(a) * ry, tam, tono);
+      }
+    }
+    // Dos carriles paralelos a los lados de un segmento; wf(u) = medio ancho en px
+    function carriles(P, ax, ay, bx, by, n, wf, tam, tono = 0, alfa = 1) {
+      const dx = bx - ax, dy = by - ay, l = Math.hypot(dx, dy) || 1;
+      const nx = -dy / l, ny = dx / l;
+      for (const s of [-1, 1]) {
+        for (let i = 0; i < n; i++) {
+          const u = (i + 0.5) / n, w = wf(u);
+          P(ax + dx * u + nx * w * s, ay + dy * u + ny * w * s, tam, tono, alfa);
+        }
+      }
+    }
+    const lineal = (a, b) => (u) => a + (b - a) * u;
+    function perfil(tabla) {
+      return (u) => {
+        for (let i = 1; i < tabla.length; i++) {
+          if (u <= tabla[i][0]) {
+            const [t0, w0] = tabla[i - 1], [t1, w1] = tabla[i];
+            const k = (u - t0) / (t1 - t0);
+            return w0 + (w1 - w0) * k * k * (3 - 2 * k);
+          }
+        }
+        return tabla[tabla.length - 1][1];
+      };
+    }
+
+    // ===== El encapuchado =====
+    // Generador: recibe P y el contexto c:
+    //   t tiempo · mov 0..1 (cuánto camina) · fase (ciclo de la caminata)
+    //   yaw = hacia dónde mira el cuerpo, suave: 0 = de frente (hacia abajo en pantalla), ±π/2 = de lado, π = de espaldas
+    //   dx, dy rumbo unitario · mx, my hacia dónde miran los ojos · abre 0..1 (parpadeo) · rastro(lag) = dónde estaba hace "lag" s
+    // Coordenadas locales: (0,0) = suelo bajo el muñeco, y negativo = arriba. Siempre pone la misma cantidad de cerebritos.
+    // Medio ancho de la túnica según la altura u (0 = punta de la capucha, 1 = borde): capucha redonda, cuello,
+    // hombros anchos, cintura y falda que se abre
+    const PERFIL_TUNICA = perfil([
+      [0, 0], [0.05, 0.09], [0.14, 0.15], [0.24, 0.145], [0.31, 0.085], [0.38, 0.13],
+      [0.50, 0.125], [0.65, 0.15], [0.82, 0.20], [1, 0.265]
+    ]);
+    function genEncapuchado(P, c) {
+      const H = ALT, K = CONFIG.capa, m = c.mov, t = c.t, ph = c.fase;
+      const top = K.arriba * H, hem = K.dobladillo * H;
+      const flota = sen(t * 1.4) * H * 0.008 - Math.abs(sen(ph)) * H * 0.012 * m;
+      const ancho = (u) => PERFIL_TUNICA(u) * H;
+      const incl = (u) => (1 - u) * (c.dx * K.inclina * H * m + sen(t * 0.8) * 0.008 * H);   // la parte de arriba se inclina
+      const onda = (u) => sen(t * 1.3 + u * 2.4) * 0.008 * H * u + sen(ph * 0.5 - u * 3) * 0.012 * H * u * m;
+      const arr = (u) => c.rastro(u * K.arrastre)[0] * 0.7;            // la tela se queda atrás, más cuanto más abajo
+      const X = (u, q) => q * ancho(u) + incl(u) + onda(u) + arr(u);
+      const Y = (u) => top + (hem - top) * u + flota;
+
+      // contorno de la túnica a los lados
+      for (const s of [-1, 1]) for (let i = 0; i < 16; i++) {
+        const u = 0.05 + (i / 15) * 0.95;
+        P(X(u, s), Y(u), TAM.m, 0);
+      }
+      // remate de la capucha
+      for (let k = 0; k < 5; k++) P(incl(0) + (k - 2) * 0.032 * H, Y(0) + (k - 2) * (k - 2) * 0.008 * H, TAM.m, 0);
+
+      // GIRO: la túnica es un cilindro y todo lo que lleva (cara, broche, costura, pliegues, mangas) está pegado a su
+      // superficie en un ángulo fijo th (0 = el frente, π = la espalda). Al girar el cuerpo, cada rasgo se desliza
+      // por la superficie (x = ancho · sen(th − giro)) y se desvanece al llegar al borde: nada salta ni cambia de tamaño.
+      // El frente del cuerpo mira hacia donde camina: con yaw = π/2 (camina a la derecha) el frente (th = 0) queda en el borde derecho.
+      const sup = (u, th) => X(u, sen(th + c.yaw));                     // x de un punto de la superficie a la altura u
+      const mira = (th, a, b) => suavizar(a, b, cos(th + c.yaw));       // 0..1: cuánto da la cara a la cámara
+      const fu = 0.165, fcy = Y(fu);
+
+      // la abertura vacía de la capucha (solo de frente) y el broche del cuello
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * TAU, th = cos(a) * 0.62;
+        P(sup(fu, th), fcy + sen(a) * 0.105 * H, TAM.xs, 1, mira(th, -0.05, 0.4));
+      }
+      P(sup(0.31, 0), Y(0.31), TAM.s, 2, mira(0, -0.05, 0.4));          // broche del cuello
+
+      // pliegues de la tela alrededor del cilindro: barren de un lado al otro al girar (los de atrás no se ven)
+      [-0.95, -0.3, 0.3, 0.95, Math.PI - 0.6, Math.PI + 0.6].forEach((th, k) => {
+        for (let i = 0; i < 3; i++) {
+          const u = 0.46 + (i / 2) * 0.45;
+          P(sup(u, th) + sen(t * 1.1 + k + u * 4) * 0.006 * H, Y(u), TAM.xs, 1, 0.9 * mira(th, -0.2, 0.5));
+        }
+      });
+
+      // mangas con la mano huesuda colgando: una a cada lado del cilindro; al girar pasan por delante del cuerpo
+      for (const br of [-1, 1]) {
+        const th = br * Math.PI / 2, g = sen(th + c.yaw);
+        const al = 0.3 + 0.7 * suavizar(-0.35, 0.35, cos(th + c.yaw));  // la de atrás se atenúa, no desaparece
+        const sa = sen(ph + (br < 0 ? 0 : Math.PI));
+        const sx = X(0.39, 0) + 0.12 * H * g, sy = Y(0.39);
+        const cx_ = X(0.67, 0) + 0.20 * H * g + sa * 0.06 * H * c.dx * m, cy_ = Y(0.67) + sa * 0.02 * H * c.dy * m;
+        const ex = (sx + cx_) / 2 + 0.02 * H * g, ey = (sy + cy_) / 2;
+        carriles(P, sx, sy, ex, ey, 3, lineal(0.03 * H, 0.04 * H), TAM.s, 0, al);
+        carriles(P, ex, ey, cx_, cy_, 3, lineal(0.04 * H, 0.05 * H), TAM.s, 0, al);
+        for (let k = 0; k < 3; k++) {
+          P(cx_ + (k - 1) * 0.014 * H, cy_ + 0.03 * H + (k === 1 ? 0.014 * H : 0) + sen(t * 2 + k + br) * 0.003 * H, TAM.xs, 2, al);
+        }
+      }
+
+      // dobladillo deshilachado y goteos
+      const largo = (j) => H * (0.012 + 0.02 * (0.5 + 0.5 * sen(t * 1.7 + j * 1.9)))
+        + ((j % 4 === 1) ? 0.035 * H * (0.5 + 0.5 * sen(t * 1.1 + j)) : 0);
+      for (let j = 0; j < 14; j++) P(X(1, -1 + (2 * (j + 0.5)) / 14), Y(1) + largo(j), TAM.m, 0);
+      [1, 5, 9, 12].forEach((j) => {
+        const x = X(1, -1 + (2 * (j + 0.5)) / 14), y = Y(1) + largo(j);
+        P(x, y + 0.026 * H, TAM.xs, 1); P(x, y + 0.052 * H, TAM.xs, 1);
+      });
+
+      // neblina bajo la túnica: no tiene pies, flota
+      for (let i = 0; i < K.bruma; i++) {
+        const k = frac(t * 0.2 + i * 0.17);
+        P(arr(1) + (-0.2 + 0.08 * i) * H + sen(t * 0.9 + i * 1.7) * 0.02 * H, Y(1) + 0.06 * H + (0.5 - 0.5 * cos(k * TAU)) * 0.05 * H, TAM.xs, 1);
+      }
+    }
+
+    // ===== Cada tarjeta con su enjambre =====
+    class Figura {
+      constructor(gen, canvas, idx, z) {
+        this.gen = gen; this.cv = canvas; this.idx = idx; this.z = z;
+        this.ctx = canvas.getContext('2d');
+        this.ajustar();
+        this.rng = crearRng(CONFIG.semilla + 5);                         // misma semilla en las dos tarjetas
+        this.ox = CONFIG.celda.w / 2; this.oy = CONFIG.celda.suelo;
+        this.x = 0; this.y = 0; this.vx = 0; this.vy = 0;
+        this.dx = 0; this.dy = 1; this.yaw = 0; this.yawT = 0;           // empieza de frente, mirando a la cámara
+        this.mx = 0; this.my = 0;
+        this.fase = 0; this.mov = 0; this.t = 0;
+        this.hist = []; this.r = [0, 0];
+        this.tx = []; this.ty = []; this.ts = []; this.tt = []; this.cnt = 0;
+        this.cer = null;
+        this.ta = [];
+        this.P = (x, y, tam, tono, alfa = 1) => {                          // alfa: 0..1, para que los rasgos se desvanezcan sin saltos
+          const n = this.cnt++;
+          this.tx[n] = x; this.ty[n] = y; this.ts[n] = tam; this.tt[n] = tono; this.ta[n] = alfa;
+        };
+        this.c = {
+          t: 0, mov: 0, fase: 0, yaw: 0, dx: 0, dy: 1, mx: 0, my: 0, abre: 1,
+          rastro: (lag) => this.rastro(lag)
+        };
+      }
+      ajustar() {
+        const { w, h } = CONFIG.celda, E = dpr * this.z;
+        this.cv.width = Math.ceil(w * E); this.cv.height = Math.ceil(h * E);
+        this.cv.style.width = w * this.z + 'px'; this.cv.style.height = h * this.z + 'px';
+      }
+      rearmar() { this.cer = null; this.rng = crearRng(CONFIG.semilla + 5); }
+      rastro(lag) {
+        const h = this.hist, tt = this.t - lag;
+        let i = h.length - 1;
+        while (i > 0 && h[i].t > tt) i--;
+        const a = h[i], b = h[Math.min(i + 1, h.length - 1)];
+        const k = b.t > a.t ? limitar((tt - a.t) / (b.t - a.t), 0, 1) : 0;
+        this.r[0] = a.x + (b.x - a.x) * k - this.x;
+        this.r[1] = a.y + (b.y - a.y) * k - this.y;
+        return this.r;
+      }
+      crearEnjambre() {
+        const n = this.cnt, rng = this.rng;
+        this.cer = { X: new Float32Array(n), Y: new Float32Array(n), k: [], f1: [], p1: [], f2: [], p2: [], f3: [], p3: [], v: [], r0: [] };
+        const e = this.cer;
+        for (let i = 0; i < n; i++) {
+          e.X[i] = this.ox + (rng() - 0.5) * 240;
+          e.Y[i] = this.oy - rng() * 220;
+          e.k.push(CONFIG.seguirMin + rng() * (CONFIG.seguirMax - CONFIG.seguirMin));
+          e.f1.push(0.7 + rng() * 0.6); e.p1.push(rng() * TAU);
+          e.f2.push(0.7 + rng() * 0.6); e.p2.push(rng() * TAU);
+          e.f3.push(0.7 + rng() * 0.6); e.p3.push(rng() * TAU);
+          e.v.push(Math.floor(rng() * CONFIG.variaciones));
+          e.r0.push((rng() * 2 - 1) * CONFIG.rotacionMax);
+        }
+      }
+      paso(dt, t, dir) {
+        this.t = t;
+        const a = suav(CONFIG.acel, dt);
+        this.vx += (dir.x * CONFIG.velMax - this.vx) * a;
+        this.vy += (dir.y * CONFIG.velMax * 0.8 - this.vy) * a;
+        const nx = limitar(this.x + this.vx * dt, -CONFIG.rango.x, CONFIG.rango.x);
+        const ny = limitar(this.y + this.vy * dt, -CONFIG.rango.y, CONFIG.rango.y);
+        if (nx !== this.x + this.vx * dt) this.vx = 0;
+        if (ny !== this.y + this.vy * dt) this.vy = 0;
+        this.x = nx; this.y = ny;
+        const vel = Math.hypot(this.vx, this.vy);
+        this.mov += (limitar(vel / CONFIG.velMax, 0, 1) - this.mov) * suav(CONFIG.mezcla, dt);
+        this.fase += vel * dt * CONFIG.cadencia;
+        if (vel > 12) {
+          this.dx += (this.vx / vel - this.dx) * suav(10, dt);
+          this.dy += (this.vy / vel - this.dy) * suav(10, dt);
+          const l = Math.hypot(this.dx, this.dy) || 1; this.dx /= l; this.dy /= l;
+        }
+        // giro del cuerpo: al caminar apunta hacia donde va (abajo = de frente, arriba = de espaldas) y se da vuelta suave
+        // el giro es un resorte amortiguado: arranca despacio, acelera y frena suave (~0.4 s para media vuelta)
+        if (vel > 12) this.yawT = Math.atan2(this.vx, this.vy);
+        const dY = Math.atan2(sen(this.yawT - this.yaw), cos(this.yawT - this.yaw)), w = CONFIG.giro;
+        this.yawVel = (this.yawVel || 0) + (w * w * dY - 2 * w * (this.yawVel || 0)) * dt;
+        this.yaw += this.yawVel * dt;
+        // hacia dónde miran los ojos: al rumbo si camina; si no, vagabundean
+        const mxT = this.mov > 0.15 ? this.dx : sen(t * 0.6) * 0.7;
+        const myT = this.mov > 0.15 ? this.dy * 0.7 : sen(t * 0.9 + 1) * 0.4;
+        this.mx += (mxT - this.mx) * suav(6, dt); this.my += (myT - this.my) * suav(6, dt);
+        const ph = t % 4.3;
+        const abre = ph > 4.1 ? 1 - sen(((ph - 4.1) / 0.2) * Math.PI) * 0.92 : 1;
+        this.hist.push({ t, x: this.x, y: this.y });
+        while (this.hist.length > 2 && t - this.hist[0].t > 2) this.hist.shift();
+
+        const c = this.c;
+        c.t = t; c.mov = this.mov; c.fase = this.fase; c.yaw = this.yaw; c.dx = this.dx; c.dy = this.dy;
+        c.mx = this.mx; c.my = this.my; c.abre = abre;
+        this.cnt = 0;
+        this.gen(this.P, c);
+        if (!this.cer || this.cer.X.length !== this.cnt) this.crearEnjambre();
+
+        const e = this.cer, ox = this.ox + this.x, oy = this.oy + this.y;
+        const ctx = this.ctx, E = dpr * this.z;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.cv.width, this.cv.height);
+        ctx.fillStyle = '#151515';                                         // hilito de suelo
+        ctx.fillRect(30 * E, Math.round((oy + 1) * E), (CONFIG.celda.w - 60) * E, Math.max(1, Math.round(dpr)));
+        for (let i = 0; i < this.cnt; i++) {
+          const q = suav(e.k[i], dt);
+          e.X[i] += (ox + this.tx[i] - e.X[i]) * q;
+          e.Y[i] += (oy + this.ty[i] - e.Y[i]) * q;
+          const quieto = 1 - 0.7 * this.mov;
+          const vx = sen(t * CONFIG.vibVel * e.f1[i] + e.p1[i]) * CONFIG.vibAmp * quieto;
+          const vy = sen(t * CONFIG.vibVel * e.f2[i] + e.p2[i]) * CONFIG.vibAmp * quieto;
+          const ang = e.r0[i] + sen(t * 1.3 * e.f3[i] + e.p3[i]) * CONFIG.rotOnda;
+          if (this.ta[i] < 0.03) continue;
+          const sp = sprite(this.ts[i], this.tt[i], this.z)[e.v[i]];
+          const co = cos(ang) * E, si = sen(ang) * E;
+          ctx.globalAlpha = this.ta[i];
+          ctx.setTransform(co, si, -si, co, (e.X[i] + vx) * E, (e.Y[i] + vy) * E);
+          ctx.drawImage(sp.canvas, -sp.lado / 2, -sp.lado / 2, sp.lado, sp.lado);
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // ===== Página =====
+    const figuras = [];
+    const fila = document.getElementById('fila');
+    CONFIG.zooms.forEach((z, i) => {
+      const art = document.createElement('article');
+      art.className = 'tarjeta';
+      const cv = document.createElement('canvas');
+      const h2 = document.createElement('h2');
+      h2.textContent = z === 1 ? 'Tamaño real' : 'Ampliado ×' + z;
+      art.append(cv, h2);
+      fila.appendChild(art);
+      figuras.push(new Figura(genEncapuchado, cv, i, z));
+    });
+
+    let modo = 'auto';
+    const teclas = new Set();
+    const bAuto = document.getElementById('bAuto'), bManual = document.getElementById('bManual');
+    function poner(m) {
+      modo = m;
+      bAuto.setAttribute('aria-pressed', m === 'auto');
+      bManual.setAttribute('aria-pressed', m === 'manual');
+    }
+    bAuto.addEventListener('click', () => poner('auto'));
+    bManual.addEventListener('click', () => poner('manual'));
+    document.getElementById('bRearmar').addEventListener('click', () => figuras.forEach((f) => f.rearmar()));
+    const MAPA = { w: 'u', arrowup: 'u', s: 'd', arrowdown: 'd', a: 'l', arrowleft: 'l', d: 'r', arrowright: 'r' };
+    window.addEventListener('keydown', (e) => {
+      const k = MAPA[e.key.toLowerCase()];
+      if (!k) return;
+      e.preventDefault(); teclas.add(k);
+      if (modo !== 'manual') poner('manual');
+    });
+    window.addEventListener('keyup', (e) => { const k = MAPA[e.key.toLowerCase()]; if (k) teclas.delete(k); });
+    window.addEventListener('blur', () => teclas.clear());
+
+    const TOTAL_AUTO = CONFIG.auto.reduce((s, a) => s + a[2], 0);
+    function direccion(t) {
+      let x = 0, y = 0;
+      if (modo === 'manual') {
+        x = (teclas.has('r') ? 1 : 0) - (teclas.has('l') ? 1 : 0);
+        y = (teclas.has('d') ? 1 : 0) - (teclas.has('u') ? 1 : 0);
+      } else {
+        let s = t % TOTAL_AUTO;
+        for (const [ax, ay, d] of CONFIG.auto) { if (s < d) { x = ax; y = ay; break; } s -= d; }
+      }
+      const l = Math.hypot(x, y) || 1;
+      return { x: x / l, y: y / l };
+    }
+
+    let ultimo = performance.now();
+    let reloj = 0;
+    function bucle(ahora) {
+      const dt = Math.min(0.05, (ahora - ultimo) / 1000);
+      ultimo = ahora; reloj += dt;
+      const dir = direccion(reloj);
+      for (const f of figuras) f.paso(dt, reloj, dir);
+      requestAnimationFrame(bucle);
+    }
+    requestAnimationFrame((t) => { ultimo = t; bucle(t); });
+  </script>
+</body>
+</html>

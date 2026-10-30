@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>El cerebro con patas</title>
+  <style>
+    html, body {
+      margin: 0;
+      background: #000;
+      color: #8a8a8a;
+      font: 13px/1.5 system-ui, sans-serif;
+    }
+    main { max-width: 1300px; margin: 0 auto; padding: 24px 28px 56px; }
+    h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #bdbdbd; }
+    p { margin: 0 0 6px; max-width: 80ch; }
+    ul { margin: 6px 0 0; padding-left: 18px; max-width: 80ch; }
+    li { margin: 2px 0; }
+    .barra { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 22px; }
+    .barra span { color: #6a6a6a; }
+    button {
+      padding: 6px 14px;
+      background: transparent;
+      border: 1px solid #6a6a6a;
+      color: #c8c8c8;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover, button:focus-visible { border-color: #e2b84a; color: #e2b84a; outline: none; }
+    button[aria-pressed="true"] { border-color: #e2b84a; color: #e2b84a; }
+    .fila { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+    .tarjeta { border: 1px solid #1c1c1c; padding: 10px 12px 12px; }
+    .tarjeta canvas { display: block; }
+    .tarjeta h2 { margin: 8px 0 0; font-size: 13px; font-weight: 600; color: #d0d0d0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>El cerebro con patas</h1>
+    <p>Misma técnica del juego: cerebritos mini que persiguen su sitio y vibran apenas al estar quieto. La tarjeta chica va a tamaño real (180 px de alto) y la grande es el mismo muñeco ampliado.</p>
+    <ul>
+      <li>Es un cerebro-elipsoide: el ojo, los pliegues y la fisura están pegados a su superficie y se deslizan al girar (como la abertura de la capucha); el ojo se desvanece de lado y de espaldas.</li>
+      <li>Cuatro patitas que caminan en diagonal; la médula cuelga de atrás y se queda rezagada: es la pista de dirección junto con la inclinación.</li>
+      <li>Parpadea y la pupila divaga un poco. Quieto flota y respira.</li>
+    </ul>
+    <div class="barra">
+      <button id="bAuto" type="button" aria-pressed="true">Automático (camina solo)</button>
+      <button id="bManual" type="button" aria-pressed="false">Manual: WASD / flechas</button>
+      <button id="bRearmar" type="button">Rearmar</button>
+      <span>Al tocar una tecla pasa a manual.</span>
+    </div>
+    <div class="fila" id="fila"></div>
+  </main>
+
+  <script>
+    // ===== Configuración (editable) =====
+    const CONFIG = {
+      semilla: 1337,
+      dprMax: 2,
+      colorTrazo: '#d0d0d0',
+      colorTenue: '#7a7a7a',
+      colorBrillo: '#ffffff',
+      variaciones: 4,
+      bultos: 4,
+      grosorMin: 0.6,
+      grosorRel: 0.13,
+      rotacionMax: 0.7,
+      celda: { w: 300, h: 300, suelo: 250 },   // lienzo de cada tarjeta (px lógicos) y altura del suelo
+      zooms: [1, 2.2],                         // tamaño real y ampliado
+      alturaPersonaje: 180,                    // igual que el juego
+      giro: 8,                                 // rapidez del giro (más bajo = se da vuelta más lento y suave)
+      rango: { x: 85, y: 45 },
+      velMax: 110,                             // más lenta que el juego para que quepa
+      acel: 9,
+      cadencia: 0.1,
+      mezcla: 10,
+      seguirMin: 26,
+      seguirMax: 40,
+      vibAmp: 0.5,
+      vibVel: 2.2,
+      rotOnda: 0.12,
+      // Recorrido automático: [dirX, dirY, segundos]
+      auto: [
+        [1, 0, 0.7], [0, 0, 0.9], [-1, 0, 1.4], [0, 0, 0.9], [1, 0, 0.7], [0, 0, 0.9],
+        [0, -1, 0.9], [0, 0, 0.9], [0, 1, 0.9], [0, 0, 0.9]
+      ],
+      // El cerebro con patas (en alturas del personaje)
+      cerebro: {
+        ancho: 0.30, alto: 0.21, fondo: 0.22,    // radios del cerebro: ancho, alto y fondo
+        altura: 0.35,                            // altura del centro del cerebro sobre el suelo
+        rebote: 0.02,                            // cuánto sube y baja al caminar
+        inclina: 0.05,                           // cuánto se inclina hacia donde va
+        profundidad: 0.25,                       // cuánto baja en pantalla lo que está adelante (vista 3/4)
+        patas: { x: 0.15, z: 0.11, paso: 0.08, levante: 0.05 },   // dónde pisa cada pata y cuánto avanza / levanta
+        medula: { n: 9, largo: 0.026, arrastre: 0.05 }
+      }
+    };
+    const ALT = CONFIG.alturaPersonaje;
+    const TAU = Math.PI * 2;
+    const sen = Math.sin, cos = Math.cos;
+    const TAM = { xs: 3.6, s: 4.6, m: 6 };   // en el juego los tamaños se piden por nombre: 'xs', 's', 'm'
+    const limitar = (v, a, b) => Math.min(b, Math.max(a, v));
+    const suav = (rapidez, dt) => 1 - Math.exp(-rapidez * dt);
+    const frac = (x) => x - Math.floor(x);
+    const suavizar = (a, b, x) => { const u = limitar((x - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
+    const dpr = Math.min(window.devicePixelRatio || 1, CONFIG.dprMax);
+
+    // ===== Utilidades =====
+    function crearRng(semilla) {
+      let a = semilla >>> 0;
+      return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    // ===== El cerebrito mini (el mismo de la Fase 0) =====
+    function crearPathCerebrito(v) {
+      const rng = crearRng(CONFIG.semilla + v * 101);
+      const j = (a) => (rng() - 0.5) * 2 * a;
+      const RX = 0.5, RY = 0.4;
+      const p = new Path2D();
+      const sobreElipse = (grados, f) => {
+        const a = grados * Math.PI / 180;
+        return [RX * f * Math.cos(a), RY * f * Math.sin(a)];
+      };
+      const bultos = CONFIG.bultos;
+      const puntoBorde = (signo, i, f) => {
+        const [x, y] = sobreElipse(-90 + (180 * i) / bultos, f);
+        return [signo * x, y];
+      };
+      const muesca = puntoBorde(1, 0, 0.72 + j(0.03));
+      const lados = [1, -1].map((signo) => {
+        const fin = [], ctl = [];
+        for (let i = 0; i < bultos; i++) {
+          ctl.push(puntoBorde(signo, i + 0.5, 1.2 + j(0.05)));
+          fin.push(puntoBorde(signo, i + 1, i + 1 < bultos ? 1 + j(0.04) : 1));
+        }
+        return { fin, ctl };
+      });
+      p.moveTo(muesca[0], muesca[1]);
+      for (let i = 0; i < bultos; i++) {
+        p.quadraticCurveTo(lados[0].ctl[i][0], lados[0].ctl[i][1], lados[0].fin[i][0], lados[0].fin[i][1]);
+      }
+      for (let i = bultos - 1; i >= 0; i--) {
+        const destino = i > 0 ? lados[1].fin[i - 1] : muesca;
+        p.quadraticCurveTo(lados[1].ctl[i][0], lados[1].ctl[i][1], destino[0], destino[1]);
+      }
+      p.moveTo(muesca[0], muesca[1]);
+      p.lineTo(j(0.03), RY * 0.95);
+      for (const lado of [1, -1]) {
+        p.moveTo(lado * (0.05 + j(0.01)), -0.12 + j(0.03));
+        p.quadraticCurveTo(lado * (0.26 + j(0.04)), -0.26 + j(0.03), lado * (0.31 + j(0.03)), -0.02 + j(0.03));
+        p.moveTo(lado * (0.06 + j(0.01)), 0.14 + j(0.03));
+        p.quadraticCurveTo(lado * (0.22 + j(0.04)), 0.08 + j(0.03), lado * (0.32 + j(0.03)), 0.22 + j(0.03));
+      }
+      return p;
+    }
+
+    // Tonos: 0 normal, 1 tenue, 2 brillo. Los sprites se hacen por zoom para que el ampliado quede nítido.
+    const TONOS = [CONFIG.colorTrazo, CONFIG.colorTenue, CONFIG.colorBrillo];
+    const cacheSprites = new Map();
+    function crearSprites(tam, color, z) {
+      const E = dpr * z;
+      const lado = Math.ceil(tam + 2);
+      const grosor = Math.max(CONFIG.grosorMin, tam * CONFIG.grosorRel);
+      const sprites = [];
+      for (let v = 0; v < CONFIG.variaciones; v++) {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(lado * E);
+        canvas.height = Math.ceil(lado * E);
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(E * tam, 0, 0, E * tam, E * lado / 2, E * lado / 2);
+        ctx.lineWidth = grosor / tam;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = color;
+        ctx.stroke(crearPathCerebrito(v));
+        sprites.push({ canvas, lado });
+      }
+      return sprites;
+    }
+    function sprite(tam, tono, z) {
+      const clave = tam + '|' + tono + '|' + z;
+      let s = cacheSprites.get(clave);
+      if (!s) { s = crearSprites(tam, TONOS[tono], z); cacheSprites.set(clave, s); }
+      return s;
+    }
+
+    // ===== Ayudas para armar formas (P pone un cerebrito objetivo: x, y, tamaño, tono) =====
+    function anillo(P, cx, cy, rx, ry, n, tam, tono = 0, a0 = 0) {
+      for (let i = 0; i < n; i++) {
+        const a = a0 + (i / n) * TAU;
+        P(cx + cos(a) * rx, cy + sen(a) * ry, tam, tono);
+      }
+    }
+    // Dos carriles paralelos a los lados de un segmento; wf(u) = medio ancho en px
+    function carriles(P, ax, ay, bx, by, n, wf, tam, tono = 0, alfa = 1) {
+      const dx = bx - ax, dy = by - ay, l = Math.hypot(dx, dy) || 1;
+      const nx = -dy / l, ny = dx / l;
+      for (const s of [-1, 1]) {
+        for (let i = 0; i < n; i++) {
+          const u = (i + 0.5) / n, w = wf(u);
+          P(ax + dx * u + nx * w * s, ay + dy * u + ny * w * s, tam, tono, alfa);
+        }
+      }
+    }
+    const lineal = (a, b) => (u) => a + (b - a) * u;
+    function perfil(tabla) {
+      return (u) => {
+        for (let i = 1; i < tabla.length; i++) {
+          if (u <= tabla[i][0]) {
+            const [t0, w0] = tabla[i - 1], [t1, w1] = tabla[i];
+            const k = (u - t0) / (t1 - t0);
+            return w0 + (w1 - w0) * k * k * (3 - 2 * k);
+          }
+        }
+        return tabla[tabla.length - 1][1];
+      };
+    }
+
+    // ===== El cerebro con patas =====
+    // Generador: recibe P y el contexto c (el mismo que el del juego):
+    //   t tiempo · mov 0..1 (cuánto camina) · fase (ciclo de la caminata)
+    //   yaw = hacia dónde mira el cuerpo, suave: 0 = de frente (hacia abajo en pantalla), ±π/2 = de lado, π = de espaldas
+    //   dx, dy rumbo unitario · rastro(lag) = dónde estaba hace "lag" s
+    // P(x, y, tam, tono, alfa): tam 'm' | 's' | 'xs'; tono 0 normal, 1 tenue, 2 brillo. Solo se usan m0, s0, s2, xs0, xs1, xs2.
+    // Coordenadas locales: (0,0) = suelo bajo el personaje, y negativo = arriba. Siempre pone la misma cantidad de cerebritos.
+    // El cerebro es un elipsoide (ancho, alto, fondo) que gira con yaw. Todo lo que lleva (ojo, pliegues, fisura, patas, médula)
+    // está pegado a él en coordenadas locales (lx derecha, ly arriba negativo, lz adelante); al girar cada punto se desliza por
+    // la superficie y se desvanece al quedar atrás (alfa continua): nada salta ni cambia de tamaño.
+    function genCerebro(P, c) {
+      const H = CONFIG.alturaPersonaje, K = CONFIG.cerebro, KP = K.patas, KM = K.medula, m = c.mov, t = c.t, ph = c.fase;
+      const sen = Math.sin, cos = Math.cos, TAU = Math.PI * 2;
+      const co = cos(c.yaw), si = sen(c.yaw), prof = K.profundidad;
+      const sq = 1 + sen(ph * 2) * 0.03 * m;                           // se estira y se aplasta un poco al caminar
+      const A = K.ancho * H * sq, B = K.alto * H / sq, D = K.fondo * H;
+      const cx = c.dx * K.inclina * H * m;                             // se inclina hacia donde va
+      const cy = -K.altura * H - Math.abs(cos(ph)) * H * K.rebote * m + sen(t * 1.7) * H * 0.004;
+      const vis = (f) => suavizar(-0.08, 0.3, f);                      // 0..1: cuánto da a la cámara (f = coseno con la vista)
+      // punto del cuerpo (local) a pantalla: [x, y, z hacia la cámara]
+      const proj = (lx, ly, lz) => { const z = lz * co - lx * si; return [cx + lx * co + lz * si, cy + ly + z * prof, z]; };
+      // punto de la superficie en (lon, lat): lon 0 = el frente del cerebro, lat > 0 = hacia arriba; devuelve [x, y, f]
+      // (sale: cuánto sobresale de la superficie, como un globo ocular; 0 = pegado)
+      const sup = (lon, lat, sale = 0) => {
+        const p = proj(A * (1 + sale) * cos(lat) * sen(lon), -B * (1 + sale * 0.5) * sen(lat), D * (1 + sale) * cos(lat) * cos(lon));
+        return [p[0], p[1], cos(lat) * cos(lon + c.yaw) * 0.97 + sen(lat) * 0.25];
+      };
+
+      // silueta: la elipse que ve la cámara (más ancha de frente que de lado) con los bultos del cerebro
+      const rx = Math.hypot(A * co, D * si), ry = B + 0.03 * H;
+      for (let i = 0; i < 30; i++) {
+        const a = (i / 30) * TAU, r = 1 + 0.07 * cos(a * 9) + 0.012 * sen(t * 1.7 + a * 3);
+        P(cx + cos(a) * rx * r, cy + sen(a) * ry * r, 'm', 0);
+      }
+
+      // fisura entre los dos hemisferios: un arco por la parte de arriba, de adelante hacia atrás
+      for (let i = 0; i < 7; i++) {
+        const e = 0.45 + (i / 6) * (Math.PI - 0.9), p = proj(0, -B * sen(e), D * cos(e));
+        P(p[0], p[1], 'xs', 1, vis(cos(e) * co * 0.97 + sen(e) * 0.25));
+      }
+
+      // circunvoluciones: cuatro anillos de pliegues muy ondulados alrededor del cerebro (se esconden donde está el ojo)
+      const EY = -0.1, RE = 0.30;                                      // el ojo: latitud de su centro y radio (en radianes de la superficie)
+      [[0.70, 11, 0, 4], [0.32, 18, 0, 5], [-0.12, 18, 1, 4], [-0.55, 14, 1, 5]].forEach(([lat0, n, tono, olas], j) => {
+        for (let i = 0; i < n; i++) {
+          const lon = ((i + 0.5 * j) / n) * TAU, lat = lat0 + 0.17 * sen(lon * olas + j * 2);
+          const [x, y, f] = sup(lon, lat);
+          const dl = Math.atan2(sen(lon), cos(lon)), libre = suavizar(0.34, 0.6, Math.hypot(dl * cos(lat), lat - EY));
+          P(x, y, 'xs', tono, 0.9 * vis(f) * libre);
+        }
+      });
+
+      // el ojo (en el frente del cerebro): un globo que sobresale (así de lado se ve asomar hacia donde mira), con párpado,
+      // iris que divaga, pupila brillante y parpadeo
+      const ciclo = t % 4.3, abre = ciclo > 4.1 ? 1 - sen(((ciclo - 4.1) / 0.2) * Math.PI) * 0.92 : 1;
+      const wl = 0.05 * sen(t * 0.6), wt = 0.04 * sen(t * 0.9 + 1);
+      const veo = (f) => suavizar(-0.5, 0.15, f);                     // el globo se sigue viendo casi de canto y se va solo por atrás
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * TAU, [x, y, f] = sup(RE * cos(a) / cos(EY), EY + RE * sen(a) * abre, 0.12);
+        P(x, y, 'xs', 2, veo(f));
+      }
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * TAU, [x, y, f] = sup(wl + 0.14 * cos(a) / cos(EY), EY + wt + 0.14 * sen(a) * abre, 0.2);
+        P(x, y, 'xs', 0, veo(f));
+      }
+      { const [x, y, f] = sup(wl, EY + wt, 0.26); P(x, y, 'xs', 2, veo(f)); }
+
+      // cuatro patitas en diagonal. Pisan en las esquinas de una elipse en el suelo que gira con el cuerpo; las de atrás se atenúan
+      [[-1, 1], [1, 1], [-1, -1], [1, -1]].forEach(([sx, sz]) => {
+        const fi = ph + (sx * sz > 0 ? 0 : Math.PI), sw = sen(fi), lev = Math.max(0, cos(fi));
+        const lx = sx * KP.x * H, lz = sz * KP.z * H, zf = lz * co - lx * si;
+        const fx_ = lx * co + lz * si + sw * KP.paso * H * c.dx * m;
+        const fy_ = zf * prof + sw * KP.paso * H * c.dy * 0.5 * m - lev * KP.levante * H * m;
+        const hip = proj(lx * 0.75, B * 0.7, lz * 0.8);
+        const al = 0.35 + 0.65 * suavizar(-0.4, 0.4, zf / (KP.z * H));
+        const kx = (hip[0] + fx_) / 2 + limitar((fx_ - cx) / (KP.x * H), -1, 1) * 0.03 * H, ky = (hip[1] + fy_) / 2 - 0.01 * H;
+        for (let i = 0; i < 3; i++) {
+          const u = (i + 0.5) / 3;
+          P(hip[0] + (kx - hip[0]) * u, hip[1] + (ky - hip[1]) * u, 'xs', 0, al);
+          P(kx + (fx_ - kx) * u, ky + (fy_ - ky) * u, 'xs', 0, al);
+        }
+        P(fx_, fy_, 's', 0, al);
+      });
+
+      // la médula: cuelga de atrás del cerebro y, al caminar, se queda rezagada siguiendo el rastro
+      const [bx, by, bz] = proj(0, B * 0.45, -D * 0.9), atras = 0.3 + 0.7 * suavizar(-0.3, 0.3, bz / D);
+      for (let i = 1; i <= KM.n; i++) {
+        const rest = [bx + sen(t * 2.2 - i * 0.7) * H * 0.012 * i * 0.5, by + i * KM.largo * H];
+        const r = c.rastro(i * KM.arrastre);
+        const tr = [bx + r[0], by + i * 0.012 * H + r[1] + sen(ph - i * 0.5) * H * 0.006 * i * 0.3];
+        P(rest[0] + (tr[0] - rest[0]) * m, rest[1] + (tr[1] - rest[1]) * m, 'xs', 1, i <= 3 ? atras : 1);
+      }
+    }
+
+    // ===== Cada tarjeta con su enjambre =====
+    class Figura {
+      constructor(gen, canvas, idx, z) {
+        this.gen = gen; this.cv = canvas; this.idx = idx; this.z = z;
+        this.ctx = canvas.getContext('2d');
+        this.ajustar();
+        this.rng = crearRng(CONFIG.semilla + 5);                         // misma semilla en las dos tarjetas
+        this.ox = CONFIG.celda.w / 2; this.oy = CONFIG.celda.suelo;
+        this.x = 0; this.y = 0; this.vx = 0; this.vy = 0;
+        this.dx = 0; this.dy = 1; this.yaw = 0; this.yawT = 0;           // empieza de frente, mirando a la cámara
+        this.mx = 0; this.my = 0;
+        this.fase = 0; this.mov = 0; this.t = 0;
+        this.hist = []; this.r = [0, 0];
+        this.tx = []; this.ty = []; this.ts = []; this.tt = []; this.cnt = 0;
+        this.cer = null;
+        this.ta = [];
+        this.P = (x, y, tam, tono, alfa = 1) => {                          // alfa: 0..1, para que los rasgos se desvanezcan sin saltos
+          const n = this.cnt++;
+          this.tx[n] = x; this.ty[n] = y; this.ts[n] = typeof tam === 'string' ? TAM[tam] : tam; this.tt[n] = tono; this.ta[n] = alfa;
+        };
+        this.c = {
+          t: 0, mov: 0, fase: 0, yaw: 0, dx: 0, dy: 1, mx: 0, my: 0, abre: 1,
+          rastro: (lag) => this.rastro(lag)
+        };
+      }
+      ajustar() {
+        const { w, h } = CONFIG.celda, E = dpr * this.z;
+        this.cv.width = Math.ceil(w * E); this.cv.height = Math.ceil(h * E);
+        this.cv.style.width = w * this.z + 'px'; this.cv.style.height = h * this.z + 'px';
+      }
+      rearmar() { this.cer = null; this.rng = crearRng(CONFIG.semilla + 5); }
+      rastro(lag) {
+        const h = this.hist, tt = this.t - lag;
+        let i = h.length - 1;
+        while (i > 0 && h[i].t > tt) i--;
+        const a = h[i], b = h[Math.min(i + 1, h.length - 1)];
+        const k = b.t > a.t ? limitar((tt - a.t) / (b.t - a.t), 0, 1) : 0;
+        this.r[0] = a.x + (b.x - a.x) * k - this.x;
+        this.r[1] = a.y + (b.y - a.y) * k - this.y;
+        return this.r;
+      }
+      crearEnjambre() {
+        const n = this.cnt, rng = this.rng;
+        this.cer = { X: new Float32Array(n), Y: new Float32Array(n), k: [], f1: [], p1: [], f2: [], p2: [], f3: [], p3: [], v: [], r0: [] };
+        const e = this.cer;
+        for (let i = 0; i < n; i++) {
+          e.X[i] = this.ox + (rng() - 0.5) * 240;
+          e.Y[i] = this.oy - rng() * 220;
+          e.k.push(CONFIG.seguirMin + rng() * (CONFIG.seguirMax - CONFIG.seguirMin));
+          e.f1.push(0.7 + rng() * 0.6); e.p1.push(rng() * TAU);
+          e.f2.push(0.7 + rng() * 0.6); e.p2.push(rng() * TAU);
+          e.f3.push(0.7 + rng() * 0.6); e.p3.push(rng() * TAU);
+          e.v.push(Math.floor(rng() * CONFIG.variaciones));
+          e.r0.push((rng() * 2 - 1) * CONFIG.rotacionMax);
+        }
+      }
+      paso(dt, t, dir) {
+        this.t = t;
+        const a = suav(CONFIG.acel, dt);
+        this.vx += (dir.x * CONFIG.velMax - this.vx) * a;
+        this.vy += (dir.y * CONFIG.velMax * 0.8 - this.vy) * a;
+        const nx = limitar(this.x + this.vx * dt, -CONFIG.rango.x, CONFIG.rango.x);
+        const ny = limitar(this.y + this.vy * dt, -CONFIG.rango.y, CONFIG.rango.y);
+        if (nx !== this.x + this.vx * dt) this.vx = 0;
+        if (ny !== this.y + this.vy * dt) this.vy = 0;
+        this.x = nx; this.y = ny;
+        const vel = Math.hypot(this.vx, this.vy);
+        this.mov += (limitar(vel / CONFIG.velMax, 0, 1) - this.mov) * suav(CONFIG.mezcla, dt);
+        this.fase += vel * dt * CONFIG.cadencia;
+        if (vel > 12) {
+          this.dx += (this.vx / vel - this.dx) * suav(10, dt);
+          this.dy += (this.vy / vel - this.dy) * suav(10, dt);
+          const l = Math.hypot(this.dx, this.dy) || 1; this.dx /= l; this.dy /= l;
+        }
+        // giro del cuerpo: al caminar apunta hacia donde va (abajo = de frente, arriba = de espaldas) y se da vuelta suave
+        // el giro es un resorte amortiguado: arranca despacio, acelera y frena suave (~0.4 s para media vuelta)
+        if (vel > 12) this.yawT = Math.atan2(this.vx, this.vy);
+        const dY = Math.atan2(sen(this.yawT - this.yaw), cos(this.yawT - this.yaw)), w = CONFIG.giro;
+        this.yawVel = (this.yawVel || 0) + (w * w * dY - 2 * w * (this.yawVel || 0)) * dt;
+        this.yaw += this.yawVel * dt;
+        // hacia dónde miran los ojos: al rumbo si camina; si no, vagabundean
+        const mxT = this.mov > 0.15 ? this.dx : sen(t * 0.6) * 0.7;
+        const myT = this.mov > 0.15 ? this.dy * 0.7 : sen(t * 0.9 + 1) * 0.4;
+        this.mx += (mxT - this.mx) * suav(6, dt); this.my += (myT - this.my) * suav(6, dt);
+        const ph = t % 4.3;
+        const abre = ph > 4.1 ? 1 - sen(((ph - 4.1) / 0.2) * Math.PI) * 0.92 : 1;
+        this.hist.push({ t, x: this.x, y: this.y });
+        while (this.hist.length > 2 && t - this.hist[0].t > 2) this.hist.shift();
+
+        const c = this.c;
+        c.t = t; c.mov = this.mov; c.fase = this.fase; c.yaw = this.yaw; c.dx = this.dx; c.dy = this.dy;
+        c.mx = this.mx; c.my = this.my; c.abre = abre;
+        this.cnt = 0;
+        this.gen(this.P, c);
+        if (!this.cer || this.cer.X.length !== this.cnt) this.crearEnjambre();
+
+        const e = this.cer, ox = this.ox + this.x, oy = this.oy + this.y;
+        const ctx = this.ctx, E = dpr * this.z;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.cv.width, this.cv.height);
+        ctx.fillStyle = '#151515';                                         // hilito de suelo
+        ctx.fillRect(30 * E, Math.round((oy + 1) * E), (CONFIG.celda.w - 60) * E, Math.max(1, Math.round(dpr)));
+        for (let i = 0; i < this.cnt; i++) {
+          const q = suav(e.k[i], dt);
+          e.X[i] += (ox + this.tx[i] - e.X[i]) * q;
+          e.Y[i] += (oy + this.ty[i] - e.Y[i]) * q;
+          const quieto = 1 - 0.7 * this.mov;
+          const vx = sen(t * CONFIG.vibVel * e.f1[i] + e.p1[i]) * CONFIG.vibAmp * quieto;
+          const vy = sen(t * CONFIG.vibVel * e.f2[i] + e.p2[i]) * CONFIG.vibAmp * quieto;
+          const ang = e.r0[i] + sen(t * 1.3 * e.f3[i] + e.p3[i]) * CONFIG.rotOnda;
+          if (this.ta[i] < 0.03) continue;
+          const sp = sprite(this.ts[i], this.tt[i], this.z)[e.v[i]];
+          const co = cos(ang) * E, si = sen(ang) * E;
+          ctx.globalAlpha = this.ta[i];
+          ctx.setTransform(co, si, -si, co, (e.X[i] + vx) * E, (e.Y[i] + vy) * E);
+          ctx.drawImage(sp.canvas, -sp.lado / 2, -sp.lado / 2, sp.lado, sp.lado);
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // ===== Página =====
+    const figuras = [];
+    const fila = document.getElementById('fila');
+    CONFIG.zooms.forEach((z, i) => {
+      const art = document.createElement('article');
+      art.className = 'tarjeta';
+      const cv = document.createElement('canvas');
+      const h2 = document.createElement('h2');
+      h2.textContent = z === 1 ? 'Tamaño real' : 'Ampliado ×' + z;
+      art.append(cv, h2);
+      fila.appendChild(art);
+      figuras.push(new Figura(genCerebro, cv, i, z));
+    });
+
+    let modo = 'auto';
+    const teclas = new Set();
+    const bAuto = document.getElementById('bAuto'), bManual = document.getElementById('bManual');
+    function poner(m) {
+      modo = m;
+      bAuto.setAttribute('aria-pressed', m === 'auto');
+      bManual.setAttribute('aria-pressed', m === 'manual');
+    }
+    bAuto.addEventListener('click', () => poner('auto'));
+    bManual.addEventListener('click', () => poner('manual'));
+    document.getElementById('bRearmar').addEventListener('click', () => figuras.forEach((f) => f.rearmar()));
+    const MAPA = { w: 'u', arrowup: 'u', s: 'd', arrowdown: 'd', a: 'l', arrowleft: 'l', d: 'r', arrowright: 'r' };
+    window.addEventListener('keydown', (e) => {
+      const k = MAPA[e.key.toLowerCase()];
+      if (!k) return;
+      e.preventDefault(); teclas.add(k);
+      if (modo !== 'manual') poner('manual');
+    });
+    window.addEventListener('keyup', (e) => { const k = MAPA[e.key.toLowerCase()]; if (k) teclas.delete(k); });
+    window.addEventListener('blur', () => teclas.clear());
+
+    const TOTAL_AUTO = CONFIG.auto.reduce((s, a) => s + a[2], 0);
+    function direccion(t) {
+      let x = 0, y = 0;
+      if (modo === 'manual') {
+        x = (teclas.has('r') ? 1 : 0) - (teclas.has('l') ? 1 : 0);
+        y = (teclas.has('d') ? 1 : 0) - (teclas.has('u') ? 1 : 0);
+      } else {
+        let s = t % TOTAL_AUTO;
+        for (const [ax, ay, d] of CONFIG.auto) { if (s < d) { x = ax; y = ay; break; } s -= d; }
+      }
+      const l = Math.hypot(x, y) || 1;
+      return { x: x / l, y: y / l };
+    }
+
+    let ultimo = performance.now();
+    let reloj = 0;
+    function bucle(ahora) {
+      const dt = Math.min(0.05, (ahora - ultimo) / 1000);
+      ultimo = ahora; reloj += dt;
+      const dir = direccion(reloj);
+      for (const f of figuras) f.paso(dt, reloj, dir);
+      requestAnimationFrame(bucle);
+    }
+    requestAnimationFrame((t) => { ultimo = t; bucle(t); });
+  </script>
+</body>
+</html>
